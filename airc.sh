@@ -7,6 +7,9 @@ COLOR_YELLOW="\033[1;33m"
 COLOR_CYAN="\033[1;36m"
 COLOR_RESET="\033[0m"
 
+# ---- Model configuration ----
+AI_MODEL="qwen2.5-coder:32b"
+
 # ---- Installation procedure ----
 if [[ "$1" == "--install" ]]; then
   # Detect user's default shell
@@ -47,7 +50,7 @@ if [[ "$1" == "--install" ]]; then
 fi
 
 # ---- AI helper (llm wrapper with memory + risk confirmation) ----
-ai() {
+_ai() {
   local tmpdir="/tmp/ai"           # Stores last command, prompt, persona, and output for redo/explain
   local ctxdir="$tmpdir/last_context" # Stores shell context (history, pwd, git status, exit code) sent to the LLM
   mkdir -p "$tmpdir" "$ctxdir"
@@ -78,7 +81,7 @@ ai() {
       return 1
     fi
 
-    llm -m qwen2.5-coder:14b \
+    llm -m "$AI_MODEL" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
@@ -123,7 +126,7 @@ Be concise, practical, and production-safe."
 
   # ---- Auto-fix failed command ----
   if [[ "$last_exit" -ne 0 && -z "$prompt" ]]; then
-    llm -m qwen2.5-coder:14b \
+    llm -m "$AI_MODEL" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
@@ -138,7 +141,7 @@ Do not execute commands."
 
   # ---- Explanation mode ----
   if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
-    llm -m qwen2.5-coder:14b \
+    llm -m "$AI_MODEL" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
@@ -151,22 +154,40 @@ User question: $prompt"
 
   # ---- Command suggestion mode ----
   local response
-  response=$(llm -m qwen2.5-coder:14b \
+  response=$(llm -m "$AI_MODEL" \
     -f "$ctxdir/history.txt" \
     -f "$ctxdir/pwd.txt" \
     -f "$ctxdir/git.txt" \
     "$system_prompt
 
-Suggest ONE safe shell command to accomplish:
-'$prompt'
+User request: '$prompt'
 
 Rules:
+- If the request is a shell/system task, output ONLY the command (no explanation)
+- If the request is conversational or informational (like greetings, questions about concepts), prefix your response with 'ANSWER:' followed by a brief answer
 - Never use rm -rf
-- Avoid destructive commands
-- Output ONLY the command.")
+- Avoid destructive commands")
 
-  # ---- Strip markdown code blocks ----
+  # ---- Strip markdown code blocks and trim whitespace ----
   response=$(echo "$response" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
+  response="${response#"${response%%[![:space:]]*}"}"  # trim leading whitespace
+  response="${response%"${response##*[![:space:]]}"}"  # trim trailing whitespace
+
+  # Only proceed if a response was returned
+  if [[ -z "$response" ]]; then
+    echo
+    echo -e "${COLOR_YELLOW}No response available.${COLOR_RESET}"
+    return 0
+  fi
+
+  # ---- Check if this is an informational answer (not a command) ----
+  if [[ "$response" == ANSWER:* ]]; then
+    local answer="${response#ANSWER:}"
+    answer="${answer#"${answer%%[![:space:]]*}"}"  # trim leading whitespace
+    echo
+    echo -e "${COLOR_CYAN}$answer${COLOR_RESET}"
+    return 0
+  fi
 
   # ---- Persist memory ----
   echo "$response" > "$tmpdir/last_command.txt"
@@ -221,3 +242,11 @@ _ai_confirm_and_run() {
   unset CLICOLOR_FORCE
   return $exit_code
 }
+
+# Re-export the function as 'ai' for convenience  
+ai() { _ai "$@"; }
+
+# Enable nonomatch in zsh so unmatched globs (like ?) are passed literally
+if [[ -n "$ZSH_VERSION" ]]; then
+  setopt nonomatch
+fi
