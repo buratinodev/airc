@@ -96,10 +96,10 @@ You need the `llm` CLI tool with a configured model:
 2. Install the Ollama plugin and pull the model:
    ```bash
    llm install llm-ollama
-   ollama pull qwen2.5-coder:14b
+   ollama pull qwen2.5-coder:32b
    ```
 
-   Or modify the script to use a different model by changing `llm -m qwen2.5-coder:14b` to your preferred model.
+   Or modify the script to use a different model by changing the `AI_MODEL` variable at the top of the script.
 
 ## Usage
 
@@ -115,14 +115,21 @@ ai list all files
 ai find large files over 100MB
 # Suggests: find . -type f -size +100M
 # Prompt: Execute this command? [Y/n]:
+```
 
-ai compress all logs in /var/log
-# Suggests: tar -czf logs_backup.tar.gz /var/log/*.log
-# Prompt: Execute this command? [Y/n]:
+### Conversational Queries
 
-ai show git branches sorted by last commit
-# Suggests: git branch --sort=-committerdate
-# Prompt: Execute this command? [Y/n]:
+For questions and greetings, airc responds directly without suggesting a command:
+
+```bash
+ai how are you?
+# I'm here and ready to help! How can I assist you today?
+
+ai what is a symlink?
+# A symlink (symbolic link) is a file that points to another file or directory...
+```
+
+> **Note**: You can use special characters like `?` and `*` without quoting - airc handles them automatically in zsh.
 ```
 
 ### Risky Command Handling
@@ -260,7 +267,10 @@ ai --deep migrate database from postgres to mysql
 ## Customization
 
 ### Change the LLM Model
-Edit the `llm -m qwen2.5-coder:14b` calls in the script to use your preferred model.
+Edit the `AI_MODEL` variable at the top of the script:
+```bash
+AI_MODEL="qwen2.5-coder:32b"
+```
 
 ### Adjust Safety Rules
 Modify the risky command detection regex in the `_ai_confirm_and_run` function to add or remove patterns.
@@ -288,8 +298,8 @@ Add new persona modes by extending the persona flag logic around line 52.
 ## Requirements
 
 - bash or zsh shell
-- `llm` CLI tool
-- An LLM model (default: qwen2.5-coder:14b via Ollama)
+- `llm` CLI tool with `llm-ollama` plugin
+- An LLM model (default: qwen2.5-coder:32b via Ollama)
 - Basic Unix tools: `grep`, `tee`, `mkdir`, `cat`
 
 ## License
