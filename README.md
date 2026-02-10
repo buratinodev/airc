@@ -30,6 +30,7 @@ Perfect for:
 - **Memory**: Remembers last suggestion for quick redo/explain
 - **Auto-Fix**: Detects failed commands and suggests fixes
 - **Colorized Output**: Preserves colors in ls, grep, diff, and tree commands
+- **Agent Mode**: Autonomous multi-step task execution with tool use, checkpoints, and safety controls
 - **Dual Modes**:
   - **sysadmin** (default): Concise, practical suggestions
   - **deep**: Step-by-step reasoning with edge case analysis
@@ -130,7 +131,6 @@ ai what is a symlink?
 ```
 
 > **Note**: You can use special characters like `?` and `*` without quoting - airc handles them automatically in zsh.
-```
 
 ### Risky Command Handling
 
@@ -160,22 +160,83 @@ ai remove old docker containers
 
 ### Explanation Mode
 
-## Safety Features
+Get a detailed explanation of the last suggested command:
 
-- **Strict confirmation** (must type "YES") for risky operations:
-  - `sudo` - privilege escalation
-  - `rm` - all file deletion commands (including `-rf`, `-r`, etc.)
-  - `dd`, `mkfs` - disk operations
-  - `shred` - secure deletion
-  - `find` with `-exec rm` or `-exec shred` - bulk deletion
-  - `mv` to deleted/trash directories
-  - `kubectl delete` - Kubernetes deletions
-  - `terraform apply/destroy` - infrastructure changes
-  - `gcloud delete` - cloud resource deletion
-- **Standard confirmation** (Y/n) for all other commands
-- **Color-coded warnings**: Red for risky, green for safe, yellow for aborted
-- **Preserved command output**: Colors maintained for ls, grep, diff, tree
-- **Context awareness**: Considers your location, git state, and recent history
+```bash
+ai explain
+# Provides detailed explanation of why the command was suggested,
+# what it does, and any potential risks
+```
+
+### Agent Mode
+
+For complex, multi-step tasks, use agent mode. The agent autonomously plans and executes a sequence of actions to achieve your goal:
+
+```bash
+ai --agent set up a new git repo with .gitignore for Node.js
+# ╔══════════════════════════════════════════════════════════╗
+# ║  🤖 Agent Mode                                         ║
+# ║  Goal: set up a new git repo with .gitignore for Node.js║
+# ║  Max steps: 15 │ Ctrl+C to abort                       ║
+# ╚══════════════════════════════════════════════════════════╝
+#
+#   ⚡ Run  step 1/15  [██░░░░░░░░] 6%
+#   $ git init
+#   ┌──────────────────────────────────────────────────────
+#   │ Initialized empty Git repository in ...
+#   └──────────────────────────────────────── ✓ exit 0 ──
+#   ...
+#   ✅ Done! Completed in 3 step(s)
+```
+
+**Safe mode** — requires confirmation before each action:
+
+```bash
+ai --agent-safe reorganize the project structure
+# Each step will prompt: Allow? [Y/n/skip]:
+# - Y: execute the action
+# - n: abort the agent entirely
+# - s/skip: skip this step and continue
+```
+
+**Continuation** — when the agent reaches the max steps limit, it asks if you want to keep going:
+
+```
+  ⚠️  Reached max steps (15) without completing goal.
+  Continue for another 15 steps? [Y/n]:
+```
+
+The step counter resets and the agent continues where it left off.
+
+**Resume from checkpoint** — if an agent run is interrupted or paused:
+
+```bash
+ai --agent --resume
+# Picks up from the last saved checkpoint
+```
+
+#### Agent Tools
+
+The agent has access to these built-in tools:
+
+| Tool | Description |
+|------|-------------|
+| `COMMAND: <cmd>` | Execute any shell command |
+| `TOOL:read_file(<path>)` | Read a file's contents |
+| `TOOL:write_file(<path>, <content>)` | Write content to a file |
+| `TOOL:search(<pattern>, <dir>)` | Search for text in files |
+| `TOOL:web_fetch(<url>)` | Fetch a URL's content |
+| `TOOL:list_dir(<path>)` | List directory contents |
+
+#### Agent Safety
+
+- Risky commands (rm, sudo, etc.) always require confirmation, even in auto mode
+- `rm -rf` is blocked entirely
+- Use `--agent-safe` to approve every action individually
+- Checkpoints are saved after each step so you can resume if interrupted
+
+### Auto-Fix Mode
+
 Just run `ai` (no arguments) after a command fails:
 
 ```bash
@@ -192,53 +253,40 @@ $ ai
 **Redo last suggestion**:
 ```bash
 ai redo
-# Re-displays and re-executes the last suggested command
 ```
 
 **Explain last suggestion**:
 ```bash
 ai explain
-# Provides detailed explanation of why the command was suggested,
-# what it does, and any potential risks
 ```
 
 **Deep thinking mode**:
 ```bash
 ai --deep migrate database from postgres to mysql
-# Uses more thorough analysis, considers edge cases and failure modes
 ```
+
+## Safety Features
+
+- **Strict confirmation** (must type "YES") for risky operations:
+  - `sudo` - privilege escalation
+  - `rm` - all file deletion commands (including `-rf`, `-r`, etc.)
+  - `dd`, `mkfs` - disk operations
+  - `shred` - secure deletion
+  - `find` with `-exec rm` or `-exec shred` - bulk deletion
+  - `mv` to deleted/trash directories
+  - `kubectl delete` - Kubernetes deletions
+  - `terraform apply/destroy` - infrastructure changes
+  - `gcloud delete` - cloud resource deletion
+- **Standard confirmation** (Y/n) for all other commands
+- **Color-coded warnings**: Red for risky, green for safe, yellow for aborted
+- **Preserved command output**: Colors maintained for ls, grep, diff, tree
+- **Context awareness**: Considers your location, git state, and recent history
 
 ### Aborting Commands
 
 - **Standard commands**: Press `n` and Enter, or just Enter to accept
 - **Risky commands**: Type anything except "YES" to abort
 - **Anytime**: Press `Ctrl+C` to abort immediately
-
-### Color Coding
-
-The wrapper uses colors to help you quickly identify information:
-- **Cyan**: Headings (e.g., "Suggested command:")
-- **Yellow/Bright Yellow**: Suggested commands and abort messages
-- **Green**: Safe command prompts
-- **Red**: Risky command warnings and errorsI explains the error and suggests a fix
-```
-
-### Special Commands
-
-**Redo last suggestion**:
-```bash
-ai redo
-```
-
-**Explain last suggestion**:
-```bash
-ai explain
-```
-
-**Deep thinking mode**:
-```bash
-ai --deep migrate database from postgres to mysql
-```
 
 ## How It Works
 
@@ -257,11 +305,18 @@ ai --deep migrate database from postgres to mysql
 ├── last_prompt.txt     # Original user intent
 ├── last_persona.txt    # Persona used (sysadmin/deep)
 ├── last_output.txt     # Output from last execution
-└── last_context/
-    ├── history.txt     # Last 15 shell commands
-    ├── pwd.txt         # Current directory
-    ├── git.txt         # Git status
-    └── exit.txt        # Last exit code
+├── last_context/
+│   ├── history.txt     # Last 15 shell commands
+│   ├── pwd.txt         # Current directory
+│   ├── git.txt         # Git status
+│   └── exit.txt        # Last exit code
+└── agent/              # Agent mode state
+    └── checkpoints/
+        ├── step_001.json   # Per-step metadata
+        ├── step_001.out    # Step output
+        ├── step_002.json
+        ├── step_002.out
+        └── agent_log.txt   # Cumulative log
 ```
 
 ## Customization
@@ -270,6 +325,18 @@ ai --deep migrate database from postgres to mysql
 Edit the `AI_MODEL` variable at the top of the script:
 ```bash
 AI_MODEL="qwen2.5-coder:32b"
+```
+
+### Agent Settings
+
+Adjust the maximum steps per batch before the agent asks to continue:
+```bash
+AI_AGENT_MAX_STEPS=15
+```
+
+Configure which tools the agent can use:
+```bash
+AI_AGENT_TOOLS="command,read_file,write_file,search,web_fetch"
 ```
 
 ### Adjust Safety Rules

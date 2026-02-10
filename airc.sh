@@ -5,6 +5,9 @@ COLOR_RED="\033[1;31m"
 COLOR_GREEN="\033[1;32m"
 COLOR_YELLOW="\033[1;33m"
 COLOR_CYAN="\033[1;36m"
+COLOR_DIM="\033[2m"
+COLOR_BOLD="\033[1m"
+COLOR_WHITE="\033[1;37m"
 COLOR_RESET="\033[0m"
 
 # ---- Model configuration ----
@@ -123,7 +126,7 @@ $(cat "$tmpdir/last_prompt.txt")"
   local prompt="$*"
 
   # ---- Capture context ----
-  history | tail -15 > "$ctxdir/history.txt"
+  fc -l -15 > "$ctxdir/history.txt" 2>/dev/null
   pwd > "$ctxdir/pwd.txt"
   git status --short 2>/dev/null > "$ctxdir/git.txt"
 
@@ -265,16 +268,12 @@ _ai_agent_dispatch_tool() {
   local tool_name=""
   local tool_args=""
 
-  # Parse TOOL:<name>(<args>) format
-  if [[ "$tool_call" =~ ^TOOL:([a-z_]+)\((.+)\)$ ]]; then
-    tool_name="${BASH_REMATCH[1]}"
-    tool_args="${BASH_REMATCH[2]}"
-    # zsh uses match array
-    if [[ -n "$ZSH_VERSION" ]]; then
-      tool_name="${match[1]}"
-      tool_args="${match[2]}"
-    fi
-  else
+  # Parse TOOL:<name>(<args>) format using sed (works in both bash and zsh)
+  local stripped="${tool_call#TOOL:}"
+  tool_name=$(echo "$stripped" | sed 's/(.*//')
+  tool_args=$(echo "$stripped" | sed 's/^[a-z_]*(\(.*\))$/\1/')
+
+  if [[ -z "$tool_name" || -z "$tool_args" ]]; then
     echo "ERROR: Invalid tool call format: $tool_call"
     return 1
   fi
@@ -319,7 +318,7 @@ _ai_agent_save_checkpoint() {
   local step="$2"
   local cmd="$3"
   local output="$4"
-  local status="$5"
+  local step_status="$5"
 
   local cpdir="$agentdir/checkpoints"
   mkdir -p "$cpdir"
@@ -330,14 +329,14 @@ _ai_agent_save_checkpoint() {
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "pwd": "$(pwd)",
   "action": $(echo "$cmd" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()))' 2>/dev/null || echo "\"$cmd\""),
-  "status": "$status",
+  "status": "$step_status",
   "output_file": "step_${step}_output.txt"
 }
 EOF
   echo "$output" > "$cpdir/step_${step}_output.txt"
 
   # Save cumulative log
-  echo "[$step] ($status) $cmd" >> "$agentdir/agent_log.txt"
+  echo "[$step] ($step_status) $cmd" >> "$agentdir/agent_log.txt"
 }
 
 _ai_agent_load_checkpoint() {
@@ -363,31 +362,133 @@ _ai_agent_load_checkpoint() {
 _ai_agent_get_history() {
   local agentdir="$1"
   local cpdir="$agentdir/checkpoints"
-  local history=""
+  local step_log=""
 
   if [[ ! -d "$cpdir" ]]; then
     echo ""
     return
   fi
 
-  for f in $(ls "$cpdir"/step_*.json 2>/dev/null | sort -V); do
-    local step_num
-    step_num=$(basename "$f" | sed 's/step_//;s/\.json//')
-    local action
-    action=$(grep '"action"' "$f" | sed 's/.*"action": *"//;s/",*//')
-    local status
-    status=$(grep '"status"' "$f" | sed 's/.*"status": *"//;s/".*//')
-    local output=""
-    [[ -f "$cpdir/step_${step_num}_output.txt" ]] && output=$(head -20 "$cpdir/step_${step_num}_output.txt")
+  local _f _sn _act _ss _out
+  for _f in $(ls "$cpdir"/step_*.json 2>/dev/null | sort -V); do
+    _sn=$(basename "$_f" | sed 's/step_//;s/\.json//')
+    _act=$(grep '"action"' "$_f" | sed 's/.*"action": *"//;s/",*//')
+    _ss=$(grep '"status"' "$_f" | sed 's/.*"status": *"//;s/".*//')
+    _out=""
+    [[ -f "$cpdir/step_${_sn}_output.txt" ]] && _out=$(head -20 "$cpdir/step_${_sn}_output.txt")
 
-    history+="
---- Step $step_num ($status) ---
-Action: $action
+    step_log+="
+--- Step $_sn ($_ss) ---
+Action: $_act
 Output (first 20 lines):
-$output
+$_out
 "
   done
-  echo "$history"
+  echo "$step_log"
+}
+
+# ---- Agent display helpers ----
+_ai_agent_header() {
+  local mode="$1" goal="$2" max_steps="$3"
+  local mode_label="auto"
+  [[ "$mode" == "safe" ]] && mode_label="safe 🔒"
+  echo
+  echo -e "${COLOR_CYAN}╔══════════════════════════════════════════════════════════╗${COLOR_RESET}"
+  echo -e "${COLOR_CYAN}║${COLOR_RESET}  ${COLOR_WHITE}🤖 Agent Mode${COLOR_RESET} ${COLOR_DIM}($mode_label)${COLOR_RESET}"
+  echo -e "${COLOR_CYAN}║${COLOR_RESET}  ${COLOR_BOLD}$goal${COLOR_RESET}"
+  echo -e "${COLOR_CYAN}║${COLOR_RESET}  ${COLOR_DIM}Max steps: $max_steps │ Ctrl+C to abort${COLOR_RESET}"
+  echo -e "${COLOR_CYAN}╚══════════════════════════════════════════════════════════╝${COLOR_RESET}"
+  echo
+}
+
+_ai_agent_step_header() {
+  local iteration="$1" max_steps="$2" label="$3" action="$4"
+  # Progress bar
+  local pct=$((iteration * 100 / max_steps))
+  local filled=$((pct / 5))
+  local empty=$((20 - filled))
+  local bar=""
+  for ((i=0; i<filled; i++)); do bar+="█"; done
+  for ((i=0; i<empty; i++)); do bar+="░"; done
+
+  echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
+  echo -e "${COLOR_CYAN}  $label${COLOR_RESET} ${COLOR_DIM}step $iteration/$max_steps${COLOR_RESET}  ${COLOR_DIM}[$bar]${COLOR_RESET} ${COLOR_DIM}${pct}%${COLOR_RESET}"
+  echo -e "  ${COLOR_YELLOW}❯ $action${COLOR_RESET}"
+}
+
+_ai_agent_show_output() {
+  local output="$1" exit_code="$2"
+  local line_count
+  line_count=$(echo "$output" | wc -l | tr -d ' ')
+
+  if [[ -n "$output" ]]; then
+    echo -e "${COLOR_DIM}  ┌─ output ──────────────────────────────────────────────${COLOR_RESET}"
+    echo "$output" | head -10 | sed 's/^/  │ /'
+    if [[ "$line_count" -gt 10 ]]; then
+      echo -e "  │ ${COLOR_DIM}... ($((line_count - 10)) more lines)${COLOR_RESET}"
+    fi
+    echo -e "${COLOR_DIM}  └──────────────────────────────────────────────────────${COLOR_RESET}"
+  fi
+
+  if [[ "$exit_code" -ne 0 ]]; then
+    echo -e "  ${COLOR_RED}✗ exit code $exit_code${COLOR_RESET}"
+  else
+    echo -e "  ${COLOR_GREEN}✓ ok${COLOR_RESET}"
+  fi
+  echo
+}
+
+# ---- Agent command executor (handles confirmation + execution) ----
+# Returns: 0=executed, 1=aborted, 2=skipped
+_ai_agent_exec_cmd() {
+  local cmd="$1" mode="$2" agentdir="$3" iteration="$4"
+
+  # Safety check for risky commands (always confirm, regardless of mode)
+  local is_risky=false
+  if echo "$cmd" | grep -Eq \
+    '(^|\s)(sudo|rm|dd|mkfs|shred|find.*(rm|shred)|mv.*deleted|kubectl delete|terraform (apply|destroy)|gcloud delete)(\s|$)'; then
+    is_risky=true
+  fi
+
+  if $is_risky; then
+    echo -e "  ${COLOR_RED}⚠️  Risky command — requires explicit approval${COLOR_RESET}"
+    echo -n -e "  ${COLOR_RED}Type YES to execute, or 'skip' to skip:${COLOR_RESET} "
+    read -r confirm
+    if [[ "$confirm" == "skip" ]]; then
+      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "SKIPPED by user (risky)" "skipped"
+      echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
+      echo
+      return 2
+    elif [[ "$confirm" != "YES" ]]; then
+      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "ABORTED by user (risky)" "aborted"
+      return 1
+    fi
+  elif [[ "$mode" == "safe" ]]; then
+    echo -n -e "  ${COLOR_GREEN}Execute? [Y/n/skip]:${COLOR_RESET} "
+    read -r confirm
+    confirm=${confirm:-Y}
+    if [[ "$confirm" =~ ^[Ss] ]]; then
+      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "SKIPPED by user" "skipped"
+      echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
+      echo
+      return 2
+    elif [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "ABORTED by user" "aborted"
+      return 1
+    fi
+  fi
+
+  # Execute
+  local cmd_output
+  cmd_output=$(eval "$cmd" 2>&1)
+  local cmd_exit=$?
+
+  _ai_agent_show_output "$cmd_output" "$cmd_exit"
+
+  local step_status="ok"
+  [[ $cmd_exit -ne 0 ]] && step_status="error"
+  _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "$cmd_output" "$step_status"
+  return 0
 }
 
 # ---- Agent mode ----
@@ -408,7 +509,8 @@ _ai_agent() {
       return 1
     fi
     goal=$(cat "$agentdir/goal.txt")
-    echo -e "${COLOR_CYAN}🔄 Resuming agent session: $goal${COLOR_RESET}"
+    mode=$(cat "$agentdir/mode.txt" 2>/dev/null || echo "auto")
+    echo -e "${COLOR_CYAN}🔄 Resuming agent session...${COLOR_RESET}"
   else
     # Fresh session - clean state
     rm -rf "$agentdir"
@@ -420,31 +522,33 @@ _ai_agent() {
   local start_step=0
   if $resume; then
     start_step=$(_ai_agent_load_checkpoint "$agentdir")
-    echo -e "${COLOR_CYAN}Resuming from step $start_step${COLOR_RESET}"
+    echo -e "  ${COLOR_DIM}Picking up from step $start_step${COLOR_RESET}"
   fi
 
-  echo
-  echo -e "${COLOR_CYAN}🤖 Agent mode ($mode): $goal${COLOR_RESET}"
-  echo -e "${COLOR_CYAN}   Max steps: $max_steps | Tools: $AI_AGENT_TOOLS${COLOR_RESET}"
-  echo
+  _ai_agent_header "$mode" "$goal" "$max_steps"
 
   # Capture initial context
   local ctxdir="/tmp/ai/last_context"
-  history | tail -15 > "$ctxdir/history.txt"
+  fc -l -15 > "$ctxdir/history.txt" 2>/dev/null
   pwd > "$ctxdir/pwd.txt"
   git status --short 2>/dev/null > "$ctxdir/git.txt"
 
   local iteration=$start_step
+  local total_steps=0
+  local _hist="" _resp="" tool_output="" tool_exit=0 step_status="" cmd="" exec_result=0 summary="" reason="" confirm=""
+  while true; do
   while [[ $iteration -lt $max_steps ]]; do
     ((iteration++))
+    ((total_steps++))
 
     # Build agent history from checkpoints
-    local agent_history
-    agent_history=$(_ai_agent_get_history "$agentdir")
+    _hist=$(_ai_agent_get_history "$agentdir")
+
+    # Thinking indicator
+    echo -ne "${COLOR_DIM}  ⏳ Thinking...${COLOR_RESET}\r"
 
     # Ask LLM for next action
-    local agent_response
-    agent_response=$(llm -m "$AI_MODEL" \
+    _resp=$(llm -m "$AI_MODEL" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
       "You are an autonomous shell agent working toward a goal.
@@ -454,7 +558,7 @@ GOAL: $goal
 STEP: $iteration of $max_steps
 
 PREVIOUS STEPS:
-$agent_history
+$_hist
 
 AVAILABLE TOOLS:
 - COMMAND: <shell command>         — Execute a shell command
@@ -476,128 +580,130 @@ Rules:
 - Prefer safe, reversible operations
 - If stuck after 3 retries, mark as FAILED")
 
+    # Clear thinking indicator
+    echo -ne "\033[2K\r"
+
     # Trim response
-    agent_response=$(echo "$agent_response" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
-    agent_response="${agent_response#"${agent_response%%[![:space:]]*}"}"
-    agent_response="${agent_response%"${agent_response##*[![:space:]]}"}"
+    _resp=$(echo "$_resp" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
+    _resp="${_resp#"${_resp%%[![:space:]]*}"}"
+    _resp="${_resp%"${_resp##*[![:space:]]}"}"
 
     # ---- Parse response ----
-    if [[ "$agent_response" == DONE:* ]]; then
-      local summary="${agent_response#DONE:}"
+    if [[ "$_resp" == DONE:* ]]; then
+      summary="${_resp#DONE:}"
       summary="${summary#"${summary%%[![:space:]]*}"}"
       _ai_agent_save_checkpoint "$agentdir" "$iteration" "DONE" "$summary" "done"
+      echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
       echo
-      echo -e "${COLOR_GREEN}✅ Goal achieved in $iteration steps!${COLOR_RESET}"
-      echo -e "${COLOR_CYAN}$summary${COLOR_RESET}"
+      echo -e "  ${COLOR_GREEN}✅ Done!${COLOR_RESET} ${COLOR_DIM}Completed in $total_steps step(s)${COLOR_RESET}"
+      echo -e "  ${COLOR_WHITE}$summary${COLOR_RESET}"
       echo
-      echo -e "Checkpoint log: ${COLOR_YELLOW}$agentdir/agent_log.txt${COLOR_RESET}"
+      echo -e "  ${COLOR_DIM}📋 Log: $agentdir/agent_log.txt${COLOR_RESET}"
+      echo
       return 0
 
-    elif [[ "$agent_response" == FAILED:* ]]; then
-      local reason="${agent_response#FAILED:}"
+    elif [[ "$_resp" == FAILED:* ]]; then
+      reason="${_resp#FAILED:}"
       reason="${reason#"${reason%%[![:space:]]*}"}"
       _ai_agent_save_checkpoint "$agentdir" "$iteration" "FAILED" "$reason" "failed"
+      echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
       echo
-      echo -e "${COLOR_RED}❌ Agent failed at step $iteration${COLOR_RESET}"
-      echo -e "${COLOR_YELLOW}$reason${COLOR_RESET}"
+      echo -e "  ${COLOR_RED}❌ Failed at step $iteration${COLOR_RESET}"
+      echo -e "  ${COLOR_YELLOW}$reason${COLOR_RESET}"
       echo
-      echo -e "Resume with: ${COLOR_YELLOW}ai --agent --resume${COLOR_RESET}"
+      echo -e "  ${COLOR_DIM}💡 Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+      echo
       return 1
 
-    elif [[ "$agent_response" == TOOL:* ]]; then
-      echo -e "${COLOR_CYAN}[$iteration/$max_steps]${COLOR_RESET} ${COLOR_YELLOW}$agent_response${COLOR_RESET}"
+    elif [[ "$_resp" == TOOL:* ]]; then
+      _ai_agent_step_header "$iteration" "$max_steps" "🔧 Tool" "$_resp"
 
       # Safe mode: confirm tool calls
       if [[ "$mode" == "safe" ]]; then
-        echo -n -e "${COLOR_GREEN}Allow this tool call? [Y/n/skip]:${COLOR_RESET} "
+        echo -n -e "  ${COLOR_GREEN}Allow? [Y/n/skip]:${COLOR_RESET} "
         read -r confirm
         confirm=${confirm:-Y}
         if [[ "$confirm" =~ ^[Ss] ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$agent_response" "SKIPPED by user" "skipped"
-          echo -e "${COLOR_YELLOW}Skipped.${COLOR_RESET}"
+          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "SKIPPED by user" "skipped"
+          echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
+          echo
           continue
         elif [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$agent_response" "ABORTED by user" "aborted"
-          echo -e "${COLOR_YELLOW}Agent aborted. Resume with: ai --agent --resume${COLOR_RESET}"
+          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "ABORTED by user" "aborted"
+          echo
+          echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+          echo
           return 1
         fi
       fi
 
-      local tool_output
-      tool_output=$(_ai_agent_dispatch_tool "$agent_response" 2>&1)
-      local tool_exit=$?
+      tool_output=$(_ai_agent_dispatch_tool "$_resp" 2>&1)
+      tool_exit=$?
 
-      echo "$tool_output" | head -10
-      [[ $(echo "$tool_output" | wc -l) -gt 10 ]] && echo -e "${COLOR_YELLOW}... (output truncated)${COLOR_RESET}"
-      echo
+      _ai_agent_show_output "$tool_output" "$tool_exit"
 
-      local status="ok"
-      [[ $tool_exit -ne 0 ]] && status="error"
-      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$agent_response" "$tool_output" "$status"
+      step_status="ok"
+      [[ $tool_exit -ne 0 ]] && step_status="error"
+      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "$tool_output" "$step_status"
 
-    elif [[ "$agent_response" == COMMAND:* ]]; then
-      local cmd="${agent_response#COMMAND:}"
+    elif [[ "$_resp" == COMMAND:* ]]; then
+      cmd="${_resp#COMMAND:}"
       cmd="${cmd#"${cmd%%[![:space:]]*}"}"
 
-      echo -e "${COLOR_CYAN}[$iteration/$max_steps]${COLOR_RESET} ${COLOR_YELLOW}$cmd${COLOR_RESET}"
+      _ai_agent_step_header "$iteration" "$max_steps" "⚡ Run" "$cmd"
 
-      # Safety check for risky commands (always confirm, regardless of mode)
-      local is_risky=false
-      if echo "$cmd" | grep -Eq \
-        '(^|\s)(sudo|rm|dd|mkfs|shred|find.*(rm|shred)|mv.*deleted|kubectl delete|terraform (apply|destroy)|gcloud delete)(\s|$)'; then
-        is_risky=true
+      _ai_agent_exec_cmd "$cmd" "$mode" "$agentdir" "$iteration"
+      exec_result=$?
+      if [[ $exec_result -eq 1 ]]; then
+        echo
+        echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+        echo
+        return 1
+      elif [[ $exec_result -eq 2 ]]; then
+        continue
       fi
-
-      if $is_risky; then
-        echo -e "${COLOR_RED}⚠️  Risky command detected.${COLOR_RESET}"
-        echo -n "Type YES to execute, or 'skip' to skip: "
-        read -r confirm
-        if [[ "$confirm" == "skip" ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "SKIPPED by user (risky)" "skipped"
-          echo -e "${COLOR_YELLOW}Skipped.${COLOR_RESET}"
-          continue
-        elif [[ "$confirm" != "YES" ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "ABORTED by user (risky)" "aborted"
-          echo -e "${COLOR_YELLOW}Agent aborted. Resume with: ai --agent --resume${COLOR_RESET}"
-          return 1
-        fi
-      elif [[ "$mode" == "safe" ]]; then
-        echo -n -e "${COLOR_GREEN}Execute? [Y/n/skip]:${COLOR_RESET} "
-        read -r confirm
-        confirm=${confirm:-Y}
-        if [[ "$confirm" =~ ^[Ss] ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "SKIPPED by user" "skipped"
-          echo -e "${COLOR_YELLOW}Skipped.${COLOR_RESET}"
-          continue
-        elif [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "ABORTED by user" "aborted"
-          echo -e "${COLOR_YELLOW}Agent aborted. Resume with: ai --agent --resume${COLOR_RESET}"
-          return 1
-        fi
-      fi
-
-      # Execute
-      local cmd_output
-      cmd_output=$(eval "$cmd" 2>&1)
-      local cmd_exit=$?
-
-      echo "$cmd_output" | head -10
-      [[ $(echo "$cmd_output" | wc -l) -gt 10 ]] && echo -e "${COLOR_YELLOW}... (output truncated)${COLOR_RESET}"
-      echo
-
-      local status="ok"
-      [[ $cmd_exit -ne 0 ]] && status="error"
-      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "$cmd_output" "$status"
 
     else
-      echo -e "${COLOR_RED}Unexpected response: $agent_response${COLOR_RESET}"
-      _ai_agent_save_checkpoint "$agentdir" "$iteration" "UNEXPECTED" "$agent_response" "error"
+      # Treat unrecognized responses as commands (LLM may omit COMMAND: prefix)
+      cmd="$_resp"
+
+      _ai_agent_step_header "$iteration" "$max_steps" "⚡ Run" "$cmd"
+
+      _ai_agent_exec_cmd "$cmd" "$mode" "$agentdir" "$iteration"
+      exec_result=$?
+      if [[ $exec_result -eq 1 ]]; then
+        echo
+        echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+        echo
+        return 1
+      elif [[ $exec_result -eq 2 ]]; then
+        continue
+      fi
     fi
   done
 
-  echo
-  echo -e "${COLOR_YELLOW}⚠️  Max steps ($max_steps) reached without completing goal.${COLOR_RESET}"
-  echo -e "Resume with: ${COLOR_YELLOW}ai --agent --resume${COLOR_RESET}"
+    echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
+    echo
+    echo -e "  ${COLOR_YELLOW}⚠️  Reached max steps ($max_steps) without completing goal.${COLOR_RESET}"
+    echo -n -e "  ${COLOR_GREEN}Continue for another $max_steps steps? [Y/n]:${COLOR_RESET} "
+    read -r confirm
+    confirm=${confirm:-Y}
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+      iteration=0
+      echo
+      echo -e "  ${COLOR_CYAN}↻ Continuing...${COLOR_RESET} ${COLOR_DIM}(total steps so far: $total_steps)${COLOR_RESET}"
+      echo
+    else
+      echo
+      echo -e "  ${COLOR_DIM}Stopped after $total_steps total step(s).${COLOR_RESET}"
+      echo -e "  ${COLOR_DIM}💡 Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+      echo
+      return 1
+    fi
+  done
+
+  # This point is unreachable due to the infinite outer loop,
+  # but kept for safety
   return 1
 }
 
