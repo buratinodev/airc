@@ -9,15 +9,15 @@ ai() {
   # ---- Special commands ----
   if [[ "$1" == "redo" ]]; then
     if [[ ! -f "$tmpdir/last_command.txt" ]]; then
-      echo "No previous AI suggestion to redo."
+      echo -e "\033[1;31mNo previous AI suggestion to redo.\033[0m"
       return 1
     fi
 
     local cmd
     cmd=$(cat "$tmpdir/last_command.txt")
 
-    echo "Redoing last suggested command:"
-    echo "  $cmd"
+    echo -e "\033[1;36mRedoing last suggested command:\033[0m"
+    echo -e "  \033[1;33m$cmd\033[0m"
     echo
 
     _ai_confirm_and_run "$cmd"
@@ -26,7 +26,7 @@ ai() {
 
   if [[ "$1" == "explain" ]]; then
     if [[ ! -f "$tmpdir/last_command.txt" ]]; then
-      echo "No previous AI suggestion to explain."
+      echo -e "\033[1;31mNo previous AI suggestion to explain.\033[0m"
       return 1
     fi
 
@@ -89,7 +89,7 @@ Do not execute commands."
   fi
 
   # ---- Explanation mode ----
-  if [[ "$prompt" =~ ^(how|why|what|explain|help)\  ]]; then
+  if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
     llm -m qwen2.5-coder:14b \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
@@ -117,11 +117,8 @@ Rules:
 - Avoid destructive commands
 - Output ONLY the command.")
 
-  # ---- Hard block rm -rf ----
-  if echo "$response" | grep -Eq 'rm\s+-rf'; then
-    echo "❌ Blocked unsafe command: rm -rf"
-    return 1
-  fi
+  # ---- Strip markdown code blocks ----
+  response=$(echo "$response" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
 
   # ---- Persist memory ----
   echo "$response" > "$tmpdir/last_command.txt"
@@ -129,8 +126,8 @@ Rules:
   echo "$persona" > "$tmpdir/last_persona.txt"
 
   echo
-  echo "Suggested command:"
-  echo "  $response"
+  echo -e "\033[1;36mSuggested command:\033[0m"
+  echo -e "  \033[1;33m$response\033[0m"
   echo
 
   _ai_confirm_and_run "$response"
@@ -142,22 +139,29 @@ _ai_confirm_and_run() {
 
   # Detect risky commands
   if echo "$cmd" | grep -Eq \
-    '(^|\s)(sudo|rm|dd|mkfs|kubectl delete|terraform (apply|destroy)|gcloud delete)(\s|$)'; then
-    echo "⚠️  Risky command detected."
-    read "?Type YES to execute: " confirm
+    '(^|\s)(sudo|rm|dd|mkfs|shred|find.*(rm|shred)|mv.*deleted|kubectl delete|terraform (apply|destroy)|gcloud delete)(\s|$)'; then
+    echo -e "\033[1;31m⚠️  Risky command detected.\033[0m"
+    echo -n "Type YES to execute (Ctrl+C to abort): "
+    read -r confirm
     if [[ "$confirm" != "YES" ]]; then
-      echo "Aborted."
+      echo -e "\033[1;33mAborted.\033[0m"
       return 0
     fi
   else
-    read "?Execute this command? [Y/n]: " confirm
+    echo -n -e "\033[1;32mExecute this command? [Y/n]:\033[0m "
+    read -r confirm
     confirm=${confirm:-Y}
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-      echo "Aborted."
+      echo -e "\033[1;33mAborted.\033[0m"
       return 0
     fi
   fi
 
+  # Force color output for common commands
+  if echo "$cmd" | grep -qE '^(ls|grep|diff|tree)'; then
+    export CLICOLOR_FORCE=1
+  fi
+  
   eval "$cmd" 2>&1 | tee "/tmp/ai/last_output.txt"
   local exit_code
   if [[ -n "$ZSH_VERSION" ]]; then
@@ -165,5 +169,7 @@ _ai_confirm_and_run() {
   else
     exit_code=${PIPESTATUS[0]}
   fi
+  
+  unset CLICOLOR_FORCE
   return $exit_code
 }
