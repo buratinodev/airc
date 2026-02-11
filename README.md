@@ -1,10 +1,10 @@
-# airc - AI-Powered Shell Assistant
+# aisha - AI-powered) Shell Assistant
 
 A bash/zsh shell function that wraps LLM (via `llm` CLI) to provide intelligent command suggestions with safety checks and context awareness.
 
 ## Purpose
 
-**airc** transforms your shell into an intelligent assistant that:
+**aisha** transforms your shell into an intelligent assistant that:
 - **Understands natural language**: Type what you want to do, not the exact command syntax
 - **Learns from context**: Automatically considers your current directory, git status, and recent commands
 - **Protects you from mistakes**: Requires explicit confirmation for risky operations with color-coded warnings
@@ -45,22 +45,22 @@ Perfect for:
 
 1. Clone or download this repository:
    ```bash
-   git clone https://github.com/buratinodev/airc.git
-   cd airc
+   git clone https://github.com/buratinodev/aisha.git
+   cd aisha
    ```
 
 2. Run the installer:
    ```bash
-   ./airc.sh --install
+   ./aisha.sh --install
    ```
 
    This will:
-   - Copy `airc.sh` to `~/.airc`
+   - Copy `aisha.sh` to `~/.aisha`
    - Detect your shell (bash or zsh)
    - Add the loader to your `~/.bashrc` or `~/.zshrc`
    - Display instructions for activating
 
-3. Load airc in your current shell:
+3. Load aisha in your current shell:
    ```bash
    source ~/.zshrc  # or source ~/.bashrc for bash users
    ```
@@ -73,14 +73,14 @@ If you prefer to install manually or need to customize the installation:
 
 1. Copy the script to your home directory:
    ```bash
-   cp airc.sh ~/.airc
+   cp aisha.sh ~/.aisha
    ```
 
 2. Add to your shell configuration file (`~/.bashrc` or `~/.zshrc`):
    ```bash
    # Load AI shell helpers
-   if [[ -f "$HOME/.airc" ]]; then
-     source "$HOME/.airc"
+   if [[ -f "$HOME/.aisha" ]]; then
+     source "$HOME/.aisha"
    fi
    ```
 
@@ -125,7 +125,7 @@ ai find large files over 100MB
 
 ### Conversational Queries
 
-For questions and greetings, airc responds directly without suggesting a command:
+For questions and greetings, aisha responds directly without suggesting a command:
 
 ```bash
 ai how are you?
@@ -136,9 +136,9 @@ ai what is a symlink?
 ```
 
 > **Note (zsh)**: Special characters like `?`, `*`, and apostrophes work without quoting.
-> airc enables `nonomatch` for glob characters, and a ZLE widget transparently replaces `'` with a
+> aisha enables `nonomatch` for glob characters, and a ZLE widget transparently replaces `'` with a
 > visually identical Unicode apostrophe (`ʼ` U+02BC) so shell parsing isn't broken.
-> If the shell still eats your arguments, airc falls back to an interactive `Ask:` prompt.
+> If the shell still eats your arguments, aisha falls back to an interactive `Ask:` prompt.
 
 ### Risky Command Handling
 
@@ -306,11 +306,11 @@ ai --deep migrate database from postgres to mysql
 
 ## Zsh Integration
 
-When running in zsh, airc enables two quality-of-life features:
+When running in zsh, aisha enables two quality-of-life features:
 
 - **`setopt nonomatch`** — Glob characters (`?`, `*`) are passed literally instead of causing errors, so you can type `ai what?` without quoting.
 - **ZLE apostrophe widget** — A lightweight `accept-line` widget detects lines starting with `ai ` that contain `'` and replaces them with the visually identical Unicode right single quotation mark (`ʼ` U+02BC). This prevents the shell from interpreting the apostrophe as an unterminated single quote. Your history stays clean: `ai whatʼs cooking?`.
-- **Interactive fallback** — If the shell still consumes your arguments (edge cases), airc detects the empty prompt and presents an `Ask:` prompt so you can type your question interactively.
+- **Interactive fallback** — If the shell still consumes your arguments (edge cases), aisha detects the empty prompt and presents an `Ask:` prompt so you can type your question interactively.
 
 These features are invisible in normal use — just type naturally.
 
