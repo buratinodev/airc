@@ -756,7 +756,7 @@ The user's request is in the attached last_prompt.txt.
 
 Rules:
 - If the request is a shell/system task, output ONLY the command (no explanation)
-- If the request is conversational or informational (like greetings, questions about concepts), prefix your response with 'ANSWER:' followed by a brief answer
+- If the request is conversational (greetings like 'hello', 'what's up', 'how are you', jokes, chit-chat, or questions about concepts), prefix your response with 'ANSWER:' followed by a brief, friendly answer — do NOT treat these as system tasks
 - Never use rm -rf
 - Avoid destructive commands")
 
