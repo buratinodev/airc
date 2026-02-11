@@ -11,8 +11,14 @@ COLOR_WHITE="\033[1;37m"
 COLOR_RESET="\033[0m"
 
 # ---- Model configuration ----
-AI_MODEL="qwen2.5-coder:32b"
+AI_MODEL_TASK="qwen3-coder:30b"       # Fast model for command suggestions & agent steps
+AI_MODEL_THINKING="qwen3:32b"         # Reasoning model for deep analysis & explanations
 AI_AGENT_MAX_STEPS=15
+
+# ---- OS detection ----
+AI_OS="$(uname -s)/$(uname -m)"
+[[ -f /etc/os-release ]] && AI_OS="$AI_OS $(. /etc/os-release && echo "$NAME $VERSION_ID")"
+[[ "$(uname -s)" == "Darwin" ]] && AI_OS="$AI_OS macOS $(sw_vers -productVersion 2>/dev/null)"
 
 # ---- Agent configuration ----
 AI_AGENT_TOOLS="command,read_file,write_file,search,web_fetch"
@@ -88,12 +94,12 @@ _ai() {
       return 1
     fi
 
-    llm -m "$AI_MODEL" \
+    llm -m "$AI_MODEL_THINKING" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
       -f "$ctxdir/exit.txt" \
-      "You are an expert sysadmin.
+      "You are an expert sysadmin. The user's OS is: $AI_OS
 Explain why this command was suggested, what it does, and any risks.
 
 Command:
@@ -133,20 +139,27 @@ $(cat "$tmpdir/last_prompt.txt")"
   local last_exit=$?
   echo "Last exit code: $last_exit" > "$ctxdir/exit.txt"
 
+  # Force deep persona for explanation queries
+  if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
+    persona="deep"
+  fi
+
   # ---- Persona system prompt ----
   local system_prompt=""
+  local model="$AI_MODEL_TASK"
   if [[ "$persona" == "deep" ]]; then
-    system_prompt="You are a senior systems engineer.
+    model="$AI_MODEL_THINKING"
+    system_prompt="You are a senior systems engineer. The user's OS is: $AI_OS
 Think step-by-step, consider edge cases, tradeoffs, and failure modes.
 Prefer correctness over speed."
   else
-    system_prompt="You are an expert Unix/Linux sysadmin.
+    system_prompt="You are an expert Unix/Linux sysadmin. The user's OS is: $AI_OS
 Be concise, practical, and production-safe."
   fi
 
   # ---- Auto-fix failed command ----
   if [[ "$last_exit" -ne 0 && -z "$prompt" ]]; then
-    llm -m "$AI_MODEL" \
+    llm -m "$AI_MODEL_THINKING" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
@@ -161,7 +174,7 @@ Do not execute commands."
 
   # ---- Explanation mode ----
   if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
-    llm -m "$AI_MODEL" \
+    llm -m "$model" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
@@ -174,7 +187,7 @@ User question: $prompt"
 
   # ---- Command suggestion mode ----
   local response
-  response=$(llm -m "$AI_MODEL" \
+  response=$(llm -m "$model" \
     -f "$ctxdir/history.txt" \
     -f "$ctxdir/pwd.txt" \
     -f "$ctxdir/git.txt" \
@@ -548,10 +561,11 @@ _ai_agent() {
     echo -ne "${COLOR_DIM}  ⏳ Thinking...${COLOR_RESET}\r"
 
     # Ask LLM for next action
-    _resp=$(llm -m "$AI_MODEL" \
+    _resp=$(llm -m "$AI_MODEL_TASK" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
       "You are an autonomous shell agent working toward a goal.
+The user's OS is: $AI_OS
 
 GOAL: $goal
 

@@ -30,10 +30,14 @@ Perfect for:
 - **Memory**: Remembers last suggestion for quick redo/explain
 - **Auto-Fix**: Detects failed commands and suggests fixes
 - **Colorized Output**: Preserves colors in ls, grep, diff, and tree commands
+- **OS-Aware**: Auto-detects your operating system for platform-specific commands
 - **Agent Mode**: Autonomous multi-step task execution with tool use, checkpoints, and safety controls
-- **Dual Modes**:
+- **Dual Models**:
+  - **Task model** (`AI_MODEL_TASK`): Fast model for command suggestions and agent steps
+  - **Thinking model** (`AI_MODEL_THINKING`): Reasoning model for deep analysis, explanations, and auto-fix
+- **Dual Personas**:
   - **sysadmin** (default): Concise, practical suggestions
-  - **deep**: Step-by-step reasoning with edge case analysis
+  - **deep**: Step-by-step reasoning with edge case analysis (auto-selected for how/why/what/explain queries)
 
 ## Installation
 
@@ -94,13 +98,14 @@ You need the `llm` CLI tool with a configured model:
    pip install llm
    ```
 
-2. Install the Ollama plugin and pull the model:
+2. Install the Ollama plugin and pull the models:
    ```bash
    llm install llm-ollama
-   ollama pull qwen2.5-coder:32b
+   ollama pull qwen3-coder:30b   # Task model (command suggestions)
+   ollama pull qwen3:32b          # Thinking model (deep analysis)
    ```
 
-   Or modify the script to use a different model by changing the `AI_MODEL` variable at the top of the script.
+   Or modify the script to use different models by changing `AI_MODEL_TASK` and `AI_MODEL_THINKING` at the top of the script.
 
 ## Usage
 
@@ -160,12 +165,19 @@ ai remove old docker containers
 
 ### Explanation Mode
 
-Get a detailed explanation of the last suggested command:
+Get a detailed explanation of the last suggested command (uses the thinking model):
 
 ```bash
 ai explain
 # Provides detailed explanation of why the command was suggested,
 # what it does, and any potential risks
+```
+
+Queries starting with how/why/what/explain/help are automatically routed to the thinking model with the deep persona:
+
+```bash
+ai what is the difference between hard links and symlinks
+# Uses AI_MODEL_THINKING for step-by-step analysis
 ```
 
 ### Agent Mode
@@ -260,9 +272,10 @@ ai redo
 ai explain
 ```
 
-**Deep thinking mode**:
+**Deep thinking mode** (uses the thinking model):
 ```bash
 ai --deep migrate database from postgres to mysql
+# Uses AI_MODEL_THINKING for thorough analysis with edge cases
 ```
 
 ## Safety Features
@@ -290,12 +303,16 @@ ai --deep migrate database from postgres to mysql
 
 ## How It Works
 
-1. Captures context (shell history, pwd, git status, last exit code)
-2. Sends your prompt + context to the LLM
-3. Gets back a suggested command
-4. Presents it for review
-5. Confirms before execution (stricter for risky commands)
-6. Executes and saves output
+1. Detects your OS at startup (e.g., `Darwin/arm64 macOS 15.3`)
+2. Captures context (shell history, pwd, git status, last exit code)
+3. Routes to the appropriate model:
+   - **Task model**: command suggestions, conversational queries, agent steps
+   - **Thinking model**: `--deep` mode, how/why/what/explain queries, auto-fix, `ai explain`
+4. Sends your prompt + context + OS info to the selected LLM
+5. Gets back a suggested command (or a direct answer for informational queries)
+6. Presents it for review
+7. Confirms before execution (stricter for risky commands)
+8. Executes and saves output
 
 ## File Structure
 
@@ -321,11 +338,22 @@ ai --deep migrate database from postgres to mysql
 
 ## Customization
 
-### Change the LLM Model
-Edit the `AI_MODEL` variable at the top of the script:
+### Change the LLM Models
+Edit the model variables at the top of the script:
 ```bash
-AI_MODEL="qwen2.5-coder:32b"
+AI_MODEL_TASK="qwen3-coder:30b"       # Fast model for command suggestions & agent steps
+AI_MODEL_THINKING="qwen3:32b"         # Reasoning model for deep analysis & explanations
 ```
+
+| Feature | Model Used |
+|---------|------------|
+| Command suggestions | `AI_MODEL_TASK` |
+| Conversational queries | `AI_MODEL_TASK` |
+| `--deep` mode | `AI_MODEL_THINKING` |
+| how/why/what/explain queries | `AI_MODEL_THINKING` |
+| `ai explain` | `AI_MODEL_THINKING` |
+| Auto-fix (failed commands) | `AI_MODEL_THINKING` |
+| Agent mode | `AI_MODEL_TASK` |
 
 ### Agent Settings
 
@@ -366,7 +394,7 @@ Add new persona modes by extending the persona flag logic around line 52.
 
 - bash or zsh shell
 - `llm` CLI tool with `llm-ollama` plugin
-- An LLM model (default: qwen2.5-coder:32b via Ollama)
+- Two LLM models via Ollama (defaults: `qwen3-coder:30b` for tasks, `qwen3:32b` for thinking)
 - Basic Unix tools: `grep`, `tee`, `mkdir`, `cat`
 
 ## License
