@@ -740,7 +740,7 @@ Do not execute commands."
       -f "$tmpdir/last_prompt.txt" \
       "$system_prompt
 
-Explain and suggest, but do NOT give commands to execute.
+Explain clearly and include one concrete command example to illustrate if applicable, but do NOT prompt the user to execute anything.
 The user's question is in the attached last_prompt.txt."
     return
   fi
