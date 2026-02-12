@@ -17,6 +17,7 @@ Perfect for:
 - Preventing destructive mistakes
 - Speeding up common tasks
 - Understanding what went wrong when commands fail
+- Examples: manipulating docker images and containers, crafting long piped commands like search and execute
 
 ## Features
 
