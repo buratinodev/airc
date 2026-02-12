@@ -365,12 +365,14 @@ _ai_agent_show_output() {
   local line_count
   line_count=$(echo "$output" | wc -l | tr -d ' ')
 
+  echo -e "${COLOR_DIM}  ┌─ output ──────────────────────────────────────────────${COLOR_RESET}"
   if [[ -n "$output" ]]; then
-    echo -e "${COLOR_DIM}  ┌─ output ──────────────────────────────────────────────${COLOR_RESET}"
     echo "$output" | head -10 | sed 's/^/  │ /'
     [[ "$line_count" -gt 10 ]] && echo -e "  │ ${COLOR_DIM}... ($((line_count - 10)) more lines)${COLOR_RESET}"
-    echo -e "${COLOR_DIM}  └──────────────────────────────────────────────────────${COLOR_RESET}"
+  else
+    echo -e "  │ ${COLOR_DIM}(no output)${COLOR_RESET}"
   fi
+  echo -e "${COLOR_DIM}  └──────────────────────────────────────────────────────${COLOR_RESET}"
 
   if [[ "$exit_code" -ne 0 ]]; then
     echo -e "  ${COLOR_RED}✗ exit code $exit_code${COLOR_RESET}"
@@ -683,11 +685,11 @@ The original user intent is in last_prompt.txt."
     shift
   fi
 
-  # ---- Delegate to agent mode ----
-  if [[ "$1" == "--agent" ]]; then
+  # ---- Delegate to agent mode (accept -agent or --agent) ----
+  if [[ "$1" == "-agent" || "$1" == "--agent" ]]; then
     shift; _ai_agent "auto" "$@"; return $?
   fi
-  if [[ "$1" == "--agent-safe" ]]; then
+  if [[ "$1" == "-agent-safe" || "$1" == "--agent-safe" ]]; then
     shift; _ai_agent "safe" "$@"; return $?
   fi
 
@@ -755,8 +757,9 @@ The user's question is in the attached last_prompt.txt."
 The user's request is in the attached last_prompt.txt.
 
 Rules:
-- If the request is a shell/system task, output ONLY the command (no explanation)
-- If the request is conversational (greetings like 'hello', 'what's up', 'how are you', jokes, chit-chat, or questions about concepts), prefix your response with 'ANSWER:' followed by a brief, friendly answer — do NOT treat these as system tasks
+- If the request is a shell/system task, output ONLY the command (no explanation). Most requests are tasks.
+- ONLY if the request is clearly a greeting or chit-chat (like 'hello', 'what's up', 'how are you'), prefix your response with 'ANSWER:' followed by a brief, friendly reply
+- When in doubt, treat it as a task and output a command
 - Never use rm -rf
 - Avoid destructive commands")
 
