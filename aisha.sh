@@ -92,6 +92,9 @@ fi
 # Regex used to detect risky commands (shared by _ai_confirm_and_run and agent)
 _AI_RISKY_RE='(^|\s)(sudo|rm|dd|mkfs|shred|find.*(rm|shred)|mv.*deleted|kubectl delete|terraform (apply|destroy)|gcloud delete)(\s|$)'
 
+# Regex for interactive/curses programs that break when piped through tee/subshell
+_AI_INTERACTIVE_RE='^(top|htop|btop|nmon|vim|vi|nvim|nano|less|more|man|watch|tmux|screen)( |$)'
+
 # Build a system prompt for the given persona.
 _ai_system_prompt() {
   local persona="$1"
@@ -125,10 +128,101 @@ _ai_capture_context() {
 # return only the first meaningful line, trimmed.
 _ai_strip_response() {
   local raw="$1"
-  raw=$(echo "$raw" | sed '/<think>/,/<\/think>/d' | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
-  raw="${raw#"${raw%%[![:space:]]*}"}"   # trim leading
-  raw="${raw%"${raw##*[![:space:]]}"}"   # trim trailing
+  # First remove single-line <think>…</think> (BSD sed range fails when both
+  # markers appear on the same line — it keeps scanning for the end marker
+  # and deletes everything that follows).
+  raw=$(echo "$raw" | sed 's/<think>[^<]*<\/think>//g')
+  # Then remove multi-line <think>…</think> blocks
+  raw=$(echo "$raw" | sed '/<think>/,/<\/think>/d')
+  # Strip markdown fences, blank lines, take first meaningful line
+  raw=$(echo "$raw" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
+  raw="${raw#"${raw%%[![:space:]]*}"}"   # trim leading whitespace  (${x%%[![:space:]]*} = everything from first non-space onward)
+  raw="${raw%"${raw##*[![:space:]]}"}"   # trim trailing whitespace (${x##*[![:space:]]}  = everything up to last non-space)
   echo "$raw"
+}
+
+# Render markdown-ish LLM output with ANSI colors for the terminal.
+# - Code blocks (``` … ```)    → yellow
+# - Inline `code`              → yellow
+# - Headings (### …)           → bold cyan
+# - Bold (**text**)            → bold white
+# - Horizontal rules (---)     → dim line
+# - Bullet lines (- …)        → green bullet + normal text
+# - <think>…</think>           → stripped
+# - Everything else            → normal
+_ai_render_markdown() {
+  local in_code=false in_think=false
+  local line lang heading bullet_text num rest
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip <think> blocks
+    if [[ "$line" == *"<think>"* ]]; then in_think=true; fi
+    if $in_think; then
+      [[ "$line" == *"</think>"* ]] && in_think=false
+      continue
+    fi
+
+    # Code fence toggle
+    if [[ "$line" =~ ^\`\`\` ]]; then
+      if $in_code; then
+        in_code=false
+      else
+        in_code=true
+        # Print language label if present
+        lang="${line#\`\`\`}"
+        [[ -n "$lang" ]] && printf "${COLOR_DIM}  ── %s ──${COLOR_RESET}\n" "$lang"
+      fi
+      continue
+    fi
+
+    # Inside code block → yellow
+    if $in_code; then
+      printf "${COLOR_YELLOW}  %s${COLOR_RESET}\n" "$line"
+      continue
+    fi
+
+    # Heading → bold cyan (strip leading #'s and whitespace)
+    if [[ "$line" =~ ^#{1,4}[[:space:]] ]]; then
+      heading=$(echo "$line" | sed 's/^#* *//')
+      printf "\n${COLOR_CYAN}${COLOR_BOLD}  %s${COLOR_RESET}\n" "$heading"
+      continue
+    fi
+
+    # Horizontal rule
+    if [[ "$line" =~ ^-{3,}$ ]]; then
+      printf "${COLOR_DIM}  ──────────────────────────────────────${COLOR_RESET}\n"
+      continue
+    fi
+
+    # Bullet points
+    if [[ "$line" =~ ^[[:space:]]*[-*][[:space:]] ]]; then
+      bullet_text="${line#*[-\*] }"
+      # Colorize inline `code` within bullets
+      bullet_text=$(echo "$bullet_text" | sed "s/\`\([^\`]*\)\`/$(printf "${COLOR_YELLOW}")\1$(printf "${COLOR_RESET}")/g")
+      printf "${COLOR_GREEN}  • ${COLOR_RESET}%b\n" "$bullet_text"
+      continue
+    fi
+
+    # Numbered list
+    if [[ "$line" =~ ^[[:space:]]*[0-9]+\.[[:space:]] ]]; then
+      num="${line%%.*}"
+      num="${num#"${num%%[![:space:]]*}"}"
+      rest="${line#*[0-9]. }"
+      rest=$(echo "$rest" | sed "s/\`\([^\`]*\)\`/$(printf "${COLOR_YELLOW}")\1$(printf "${COLOR_RESET}")/g")
+      printf "${COLOR_CYAN}  %s.${COLOR_RESET} %b\n" "$num" "$rest"
+      continue
+    fi
+
+    # Empty line
+    if [[ -z "$line" ]]; then
+      echo
+      continue
+    fi
+
+    # Normal text: render **bold** and `code`
+    line=$(echo "$line" | sed "s/\*\*\([^*]*\)\*\*/$(printf "${COLOR_BOLD}${COLOR_WHITE}")\1$(printf "${COLOR_RESET}")/g")
+    line=$(echo "$line" | sed "s/\`\([^\`]*\)\`/$(printf "${COLOR_YELLOW}")\1$(printf "${COLOR_RESET}")/g")
+    printf "  %b\n" "$line"
+  done
 }
 
 
@@ -164,12 +258,23 @@ _ai_confirm_and_run() {
     export CLICOLOR_FORCE=1
   fi
 
-  eval "$cmd" 2>&1 | tee "/tmp/ai/last_output.txt"
-  local exit_code
-  if [[ -n "$ZSH_VERSION" ]]; then
-    exit_code=${pipestatus[1]}
+  # Interactive/curses commands get garbled when piped through tee.
+  # Detect them and run directly, saving output only for non-interactive cmds.
+  local _ai_interactive=false\n  local exit_code
+  if echo "$cmd" | grep -qE "$_AI_INTERACTIVE_RE"; then
+    _ai_interactive=true
+  fi
+
+  if $_ai_interactive; then
+    eval "$cmd"
+    exit_code=$?
   else
-    exit_code=${PIPESTATUS[0]}
+    eval "$cmd" 2>&1 | tee "/tmp/ai/last_output.txt"
+    if [[ -n "$ZSH_VERSION" ]]; then
+      exit_code=${pipestatus[1]}
+    else
+      exit_code=${PIPESTATUS[0]}
+    fi
   fi
 
   unset CLICOLOR_FORCE
@@ -209,7 +314,14 @@ _ai_tool_search() {
 _ai_tool_web_fetch() {
   local url="$1"
   if command -v curl &>/dev/null; then
-    curl -sL "$url" | head -200
+    local output
+    output=$(curl -sL --fail --max-time 15 "$url" 2>&1)
+    if [[ $? -ne 0 ]]; then
+      echo "ERROR: Failed to fetch $url"
+      [[ -n "$output" ]] && echo "$output"
+      return 1
+    fi
+    echo "$output" | head -200
   else
     echo "ERROR: curl not available"
     return 1
@@ -291,10 +403,10 @@ _ai_agent_load_checkpoint() {
   local cpdir="$1/checkpoints"
   if [[ ! -d "$cpdir" ]]; then echo "0"; return; fi
 
-  local last_step=0
+  local last_step=0 n
   for f in "$cpdir"/step_*.json; do
     [[ -f "$f" ]] || continue
-    local n; n=$(basename "$f" | sed 's/step_//;s/\.json//')
+    n=$(basename "$f" | sed 's/step_//;s/\.json//')
     [[ "$n" -gt "$last_step" ]] && last_step="$n"
   done
   echo "$last_step"
@@ -316,9 +428,9 @@ _ai_agent_get_history() {
     echo "(Steps 1-$skipped omitted for brevity)"
   fi
 
+  local _sn _act _ss _out
   echo "$all_files" | tail -n "$max_history" | while IFS= read -r _f; do
     [[ -z "$_f" ]] && continue
-    local _sn _act _ss _out
     _sn=$(basename "$_f" | sed 's/step_//;s/\.json//')
     _act=$(grep '"action"' "$_f" | sed 's/.*"action": *"//;s/",*//')
     _ss=$(grep '"status"' "$_f" | sed 's/.*"status": *"//;s/".*//')
@@ -424,10 +536,16 @@ _ai_agent_exec_cmd() {
     fi
   fi
 
-  # Execute
+  # Execute — interactive/curses commands run directly, others capture output
   local cmd_output cmd_exit step_status
-  cmd_output=$(eval "$cmd" 2>&1)
-  cmd_exit=$?
+  if echo "$cmd" | grep -qE "$_AI_INTERACTIVE_RE"; then
+    eval "$cmd"
+    cmd_exit=$?
+    cmd_output="(interactive command — output not captured)"
+  else
+    cmd_output=$(eval "$cmd" 2>&1)
+    cmd_exit=$?
+  fi
 
   _ai_agent_show_output "$cmd_output" "$cmd_exit"
 
@@ -441,6 +559,41 @@ _ai_agent_exec_cmd() {
 # ============================================================================
 # 8. AGENT LOOP
 # ============================================================================
+
+# Build the system prompt sent to the LLM at each agent step.
+_ai_agent_system_prompt() {
+  local step="$1" max_steps="$2" total="$3"
+  cat <<EOF
+You are an autonomous shell agent working toward a goal.
+The user's OS is: $AI_OS
+
+The goal is in the attached goal.txt.
+
+STEP: $step of $max_steps (total: $total)
+
+The attached history_context.txt contains your previous steps.
+
+AVAILABLE TOOLS:
+- COMMAND: <shell command>         — Execute a shell command
+- TOOL:read_file(<path>)           — Read a file's contents
+- TOOL:write_file(<path>, <content>) — Write content to a file
+- TOOL:search(<pattern>, <dir>)    — Search for text in files
+- TOOL:web_fetch(<url>)            — Fetch a URL's content
+- TOOL:list_dir(<path>)            — List directory contents
+
+RESPONSE FORMAT — reply with EXACTLY ONE of:
+1. COMMAND: <shell command to execute>
+2. TOOL:<tool_name>(<args>)
+3. DONE: <summary of what was accomplished>
+4. FAILED: <explanation of why the goal cannot be achieved>
+
+Rules:
+- One action per step, observe output before deciding next
+- Never use rm -rf
+- Prefer safe, reversible operations
+- If stuck after 3 retries, mark as FAILED
+EOF
+}
 
 _ai_agent() {
   local mode="$1"  # "auto" or "safe"
@@ -478,140 +631,118 @@ _ai_agent() {
 
   # Capture initial context
   local ctxdir="/tmp/ai/last_context"
-  fc -l -15 > "$ctxdir/history.txt" 2>/dev/null
-  pwd > "$ctxdir/pwd.txt"
-  git status --short 2>/dev/null > "$ctxdir/git.txt"
+  local last_exit
+  _ai_capture_context "$ctxdir"
 
   # ---- Step loop ----
+  # Outer loop: allows continuation after hitting max_steps
+  # Inner loop: runs steps 1…max_steps, then breaks to the outer loop for the
+  #             "continue for another N steps?" prompt
   local iteration=$start_step total_steps=0
   local _resp="" cmd="" exec_result=0 confirm=""
 
-  while true; do
-  while [[ $iteration -lt $max_steps ]]; do
-    ((iteration++))
-    ((total_steps++))
+  while true; do          # ← continuation loop
+    while [[ $iteration -lt $max_steps ]]; do   # ← step loop
+      ((iteration++))
+      ((total_steps++))
 
-    # Build rolling history (last 5 steps)
-    _ai_agent_get_history "$agentdir" 5 > "$agentdir/history_context.txt"
+      # Build rolling history (last 5 steps)
+      _ai_agent_get_history "$agentdir" 5 > "$agentdir/history_context.txt"
 
-    echo -ne "${COLOR_DIM}  ⏳ Thinking...${COLOR_RESET}\r"
+      echo -ne "${COLOR_DIM}  ⏳ Thinking...${COLOR_RESET}\r"
 
-    # ---- Ask LLM for next action ----
-    _resp=$(llm -m "$AI_MODEL_TASK" \
-      -f "$ctxdir/pwd.txt" \
-      -f "$ctxdir/git.txt" \
-      -f "$agentdir/goal.txt" \
-      -f "$agentdir/history_context.txt" \
-      "You are an autonomous shell agent working toward a goal.
-The user's OS is: $AI_OS
+      # ---- Ask LLM for next action ----
+      local _agent_prompt
+      _agent_prompt=$(_ai_agent_system_prompt "$iteration" "$max_steps" "$total_steps")
 
-The goal is in the attached goal.txt.
+      _resp=$(llm -m "$AI_MODEL_TASK" \
+        -f "$ctxdir/pwd.txt" \
+        -f "$ctxdir/git.txt" \
+        -f "$agentdir/goal.txt" \
+        -f "$agentdir/history_context.txt" \
+        "$_agent_prompt")
 
-STEP: $iteration of $max_steps (total: $total_steps)
+      echo -ne "\033[2K\r"   # clear thinking indicator
 
-The attached history_context.txt contains your previous steps.
+      _resp=$(_ai_strip_response "$_resp")
 
-AVAILABLE TOOLS:
-- COMMAND: <shell command>         — Execute a shell command
-- TOOL:read_file(<path>)           — Read a file's contents
-- TOOL:write_file(<path>, <content>) — Write content to a file
-- TOOL:search(<pattern>, <dir>)    — Search for text in files
-- TOOL:web_fetch(<url>)            — Fetch a URL's content
-- TOOL:list_dir(<path>)            — List directory contents
+      # ---- Handle: DONE ----
+      if [[ "$_resp" == DONE:* ]]; then
+        local summary="${_resp#DONE:}"
+        summary="${summary#"${summary%%[![:space:]]*}"}"
+        _ai_agent_save_checkpoint "$agentdir" "$iteration" "DONE" "$summary" "done"
+        echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
+        echo
+        echo -e "  ${COLOR_GREEN}✅ Done!${COLOR_RESET} ${COLOR_DIM}Completed in $total_steps step(s)${COLOR_RESET}"
+        echo -e "  ${COLOR_WHITE}$summary${COLOR_RESET}"
+        echo
+        echo -e "  ${COLOR_DIM}📋 Log: $agentdir/agent_log.txt${COLOR_RESET}"
+        echo
+        return 0
 
-RESPONSE FORMAT — reply with EXACTLY ONE of:
-1. COMMAND: <shell command to execute>
-2. TOOL:<tool_name>(<args>)
-3. DONE: <summary of what was accomplished>
-4. FAILED: <explanation of why the goal cannot be achieved>
+      # ---- Handle: FAILED ----
+      elif [[ "$_resp" == FAILED:* ]]; then
+        local reason="${_resp#FAILED:}"
+        reason="${reason#"${reason%%[![:space:]]*}"}"
+        _ai_agent_save_checkpoint "$agentdir" "$iteration" "FAILED" "$reason" "failed"
+        echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
+        echo
+        echo -e "  ${COLOR_RED}❌ Failed at step $iteration${COLOR_RESET}"
+        echo -e "  ${COLOR_YELLOW}$reason${COLOR_RESET}"
+        echo
+        echo -e "  ${COLOR_DIM}💡 Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+        echo
+        return 1
 
-Rules:
-- One action per step, observe output before deciding next
-- Never use rm -rf
-- Prefer safe, reversible operations
-- If stuck after 3 retries, mark as FAILED")
+      # ---- Handle: TOOL call ----
+      elif [[ "$_resp" == TOOL:* ]]; then
+        _ai_agent_step_header "$iteration" "$max_steps" "🔧 Tool" "$_resp"
 
-    echo -ne "\033[2K\r"   # clear thinking indicator
+        if [[ "$mode" == "safe" ]]; then
+          echo -n -e "  ${COLOR_GREEN}Allow? [Y/n/skip]:${COLOR_RESET} "
+          read -r confirm
+          confirm=${confirm:-Y}
+          if [[ "$confirm" =~ ^[Ss] ]]; then
+            _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "SKIPPED by user" "skipped"
+            echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
+            echo
+            continue
+          elif [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "ABORTED by user" "aborted"
+            echo
+            echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+            echo
+            return 1
+          fi
+        fi
 
-    _resp=$(_ai_strip_response "$_resp")
+        local tool_output tool_exit step_status
+        tool_output=$(_ai_agent_dispatch_tool "$_resp" 2>&1)
+        tool_exit=$?
+        _ai_agent_show_output "$tool_output" "$tool_exit"
+        step_status="ok"
+        [[ $tool_exit -ne 0 ]] && step_status="error"
+        _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "$tool_output" "$step_status"
 
-    # ---- Handle: DONE ----
-    if [[ "$_resp" == DONE:* ]]; then
-      local summary="${_resp#DONE:}"
-      summary="${summary#"${summary%%[![:space:]]*}"}"
-      _ai_agent_save_checkpoint "$agentdir" "$iteration" "DONE" "$summary" "done"
-      echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
-      echo
-      echo -e "  ${COLOR_GREEN}✅ Done!${COLOR_RESET} ${COLOR_DIM}Completed in $total_steps step(s)${COLOR_RESET}"
-      echo -e "  ${COLOR_WHITE}$summary${COLOR_RESET}"
-      echo
-      echo -e "  ${COLOR_DIM}📋 Log: $agentdir/agent_log.txt${COLOR_RESET}"
-      echo
-      return 0
+      # ---- Handle: COMMAND (or bare command without prefix) ----
+      else
+        [[ "$_resp" == COMMAND:* ]] && _resp="${_resp#COMMAND:}"
+        cmd="${_resp#"${_resp%%[![:space:]]*}"}"
 
-    # ---- Handle: FAILED ----
-    elif [[ "$_resp" == FAILED:* ]]; then
-      local reason="${_resp#FAILED:}"
-      reason="${reason#"${reason%%[![:space:]]*}"}"
-      _ai_agent_save_checkpoint "$agentdir" "$iteration" "FAILED" "$reason" "failed"
-      echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
-      echo
-      echo -e "  ${COLOR_RED}❌ Failed at step $iteration${COLOR_RESET}"
-      echo -e "  ${COLOR_YELLOW}$reason${COLOR_RESET}"
-      echo
-      echo -e "  ${COLOR_DIM}💡 Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
-      echo
-      return 1
+        _ai_agent_step_header "$iteration" "$max_steps" "⚡ Run" "$cmd"
 
-    # ---- Handle: TOOL call ----
-    elif [[ "$_resp" == TOOL:* ]]; then
-      _ai_agent_step_header "$iteration" "$max_steps" "🔧 Tool" "$_resp"
-
-      if [[ "$mode" == "safe" ]]; then
-        echo -n -e "  ${COLOR_GREEN}Allow? [Y/n/skip]:${COLOR_RESET} "
-        read -r confirm
-        confirm=${confirm:-Y}
-        if [[ "$confirm" =~ ^[Ss] ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "SKIPPED by user" "skipped"
-          echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
-          echo
-          continue
-        elif [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-          _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "ABORTED by user" "aborted"
+        _ai_agent_exec_cmd "$cmd" "$mode" "$agentdir" "$iteration"
+        exec_result=$?
+        if [[ $exec_result -eq 1 ]]; then
           echo
           echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
           echo
           return 1
+        elif [[ $exec_result -eq 2 ]]; then
+          continue
         fi
       fi
-
-      local tool_output tool_exit step_status
-      tool_output=$(_ai_agent_dispatch_tool "$_resp" 2>&1)
-      tool_exit=$?
-      _ai_agent_show_output "$tool_output" "$tool_exit"
-      step_status="ok"
-      [[ $tool_exit -ne 0 ]] && step_status="error"
-      _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "$tool_output" "$step_status"
-
-    # ---- Handle: COMMAND (or bare command without prefix) ----
-    else
-      [[ "$_resp" == COMMAND:* ]] && _resp="${_resp#COMMAND:}"
-      cmd="${_resp#"${_resp%%[![:space:]]*}"}"
-
-      _ai_agent_step_header "$iteration" "$max_steps" "⚡ Run" "$cmd"
-
-      _ai_agent_exec_cmd "$cmd" "$mode" "$agentdir" "$iteration"
-      exec_result=$?
-      if [[ $exec_result -eq 1 ]]; then
-        echo
-        echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
-        echo
-        return 1
-      elif [[ $exec_result -eq 2 ]]; then
-        continue
-      fi
-    fi
-  done
+    done   # ← end step loop
 
     # ---- Max steps reached — offer continuation ----
     echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
@@ -632,7 +763,7 @@ Rules:
       echo
       return 1
     fi
-  done
+  done     # ← end continuation loop
 }
 
 
@@ -674,7 +805,7 @@ _ai() {
       -f "$tmpdir/last_prompt.txt" \
       "You are an expert sysadmin. The user's OS is: $AI_OS
 Explain why the command in last_command.txt was suggested, what it does, and any risks.
-The original user intent is in last_prompt.txt."
+The original user intent is in last_prompt.txt." | _ai_render_markdown
     return
   fi
 
@@ -712,7 +843,7 @@ The original user intent is in last_prompt.txt."
 
 The user's last command failed.
 Explain why it failed and suggest a fix.
-Do not execute commands."
+Do not execute commands." | _ai_render_markdown
     return
   fi
 
@@ -724,7 +855,7 @@ Do not execute commands."
   fi
 
   # Auto-select deep persona for explanation queries
-  if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
+  if [[ "$prompt" =~ ^(how|why|what|explain|help)([[:space:]]|$) ]]; then
     persona="deep"
   fi
 
@@ -732,7 +863,7 @@ Do not execute commands."
   local system_prompt; system_prompt=$(_ai_system_prompt "$persona")
 
   # ---- Explanation mode (how/why/what/explain/help) ----
-  if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
+  if [[ "$prompt" =~ ^(how|why|what|explain|help)([[:space:]]|$) ]]; then
     llm -m "$model" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
@@ -741,7 +872,7 @@ Do not execute commands."
       "$system_prompt
 
 Explain clearly and include one concrete command example to illustrate if applicable, but do NOT prompt the user to execute anything.
-The user's question is in the attached last_prompt.txt."
+The user's question is in the attached last_prompt.txt." | _ai_render_markdown
     return
   fi
 
